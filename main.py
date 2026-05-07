@@ -3,7 +3,6 @@ import json
 import random
 import datetime
 import asyncio
-from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -314,14 +313,13 @@ async def update_weekly_activity(db_conn, user_id, bet):
 # -------- команды --------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    username = update.effective_user.username
     db_conn = context.bot_data['db']
     restriction = await check_ban_mute(user_id, db_conn)
     if restriction:
         await update.message.reply_text(restriction)
         return
     ref_code = context.args[0] if context.args else None
-    user = await db.create_user_if_not_exists(db_conn, user_id, username=username)
+    user = await db.create_user_if_not_exists(db_conn, user_id)
     if ref_code and not user['referral_by']:
         row = await db_conn.execute("SELECT user_id FROM referral_codes WHERE code = ?", (ref_code,))
         ref_row = await row.fetchone()
@@ -898,7 +896,7 @@ async def referral_system_callback(update: Update, context: ContextTypes.DEFAULT
     keyboard = [[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# -------- Админ-панель и новые функции --------
+# -------- Админ-панель --------
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -944,16 +942,16 @@ async def admin_users_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👥 Управление пользователями\n\n"
         "Используйте команды:\n"
-        "/addbalance <user_id|@username> <amount>\n"
-        "/setbalance <user_id|@username> <amount>\n"
-        "/ban <user_id|@username> <причина>\n"
-        "/unban <user_id|@username>\n"
-        "/mute <user_id|@username> <минуты> <причина>\n"
-        "/unmute <user_id|@username>\n"
-        "/warn <user_id|@username> <причина>\n"
-        "/unwarn <user_id|@username>\n"
-        "/vip <user_id|@username> <дни>\n"
-        "/unvip <user_id|@username>"
+        "/addbalance <user_id> <amount>\n"
+        "/setbalance <user_id> <amount>\n"
+        "/ban <user_id> <причина>\n"
+        "/unban <user_id>\n"
+        "/mute <user_id> <минуты> <причина>\n"
+        "/unmute <user_id>\n"
+        "/warn <user_id> <причина>\n"
+        "/unwarn <user_id>\n"
+        "/vip <user_id> <дни>\n"
+        "/unvip <user_id>"
     )
     keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -974,12 +972,53 @@ async def admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def admin_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db_conn = context.bot_data['db']
+    promos = await db.get_all_promo_codes(db_conn)
+    if not promos:
+        text = "Промокодов нет."
+    else:
+        text = "🎁 Промокоды:\n\n"
+        for p in promos[:10]:
+            used = len(json.loads(p['used_by']))
+            text += f"Код: {p['code']}\nСумма: {p['amount']} ⭐\nОсталось: {p['uses_left']}\nИсп.: {used}\n\n"
+        if len(promos) > 10:
+            text += f"... и ещё {len(promos)-10}"
+    keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db_conn = context.bot_data['db']
+    logs = await db.get_recent_logs(db_conn, limit=10)
+    if not logs:
+        text = "Логи пусты."
+    else:
+        text = "📋 Последние логи:\n\n"
+        for log in logs:
+            text += f"[{log['timestamp'][:16]}] {log['action']} - admin:{log['admin_id']} target:{log['target_id']} {log['details']}\n"
+    keyboard = [[InlineKeyboardButton("🗑️ Очистить", callback_data="admin_clear_logs"),
+                 InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_clear_logs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db_conn = context.bot_data['db']
+    await db.clear_logs_db(db_conn)
+    await query.edit_message_text("✅ Логи очищены.", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]
+    ]))
+
 async def admin_find_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    await query.edit_message_text("🔍 Введите ID или @username пользователя:",
+    await query.edit_message_text("🔍 Введите ID пользователя:",
                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]]))
     return WAITING_SEARCH_USER
 
@@ -989,19 +1028,18 @@ async def admin_find_user_execute(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
     db_conn = context.bot_data['db']
     query_text = update.message.text.strip()
-    target = None
     try:
         target_id = int(query_text)
         target = await db.get_user(db_conn, target_id)
     except ValueError:
-        target = await db.get_user_by_username(db_conn, query_text)
+        await update.message.reply_text("❌ Некорректный ID.")
+        return ConversationHandler.END
     if not target:
         await update.message.reply_text("❌ Пользователь не найден.")
         return ConversationHandler.END
     act = await db.get_user_activity(db_conn, target['user_id'])
     info = (
-        f"👤 Пользователь: @{target.get('username', 'нет')}\n"
-        f"🆔 ID: {target['user_id']}\n"
+        f"👤 Пользователь ID: {target['user_id']}\n"
         f"💰 Баланс: {round(target['game_balance'], 1)} ⭐\n"
         f"🎮 Игр: {target['total_games']} | Побед: {target['total_wins']}\n"
         f"📅 Регистрация: {target['registration_date'][:10]}\n"
@@ -1019,17 +1057,16 @@ async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(query.from_user.id):
         return
     db_conn = context.bot_data['db']
-    rows = await (await db_conn.execute("SELECT user_id, username, game_balance FROM users LIMIT 50")).fetchall()
+    rows = await (await db_conn.execute("SELECT user_id, game_balance FROM users LIMIT 50")).fetchall()
     if not rows:
         text = "Нет пользователей."
     else:
         text = "👥 Список пользователей (первые 50):\n\n"
         for row in rows:
-            uname = row['username'] or f"id{row['user_id']}"
-            text += f"@{uname} | ID: {row['user_id']} | Баланс: {round(row['game_balance'],1)} ⭐\n"
+            text += f"ID: {row['user_id']} | Баланс: {round(row['game_balance'],1)} ⭐\n"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]))
 
-# -------- Промокод с рассылкой --------
+# -------- Админские команды --------
 async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
@@ -1060,198 +1097,258 @@ async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except:
                 pass
 
-# -------- Админские команды с поддержкой username --------
-async def find_user_by_arg(db_conn, arg):
+async def promo_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        uid = int(arg)
-        return await db.get_user(db_conn, uid)
-    except ValueError:
-        return await db.get_user_by_username(db_conn, arg)
+        code = context.args[0].upper()
+    except IndexError:
+        await update.message.reply_text("Используйте: /promo_delete <код>")
+        return
+    db_conn = context.bot_data['db']
+    await db.delete_promo_code_db(db_conn, code)
+    await db.log_admin_action(db_conn, user_id, "promo_delete", details=f"код: {code}")
+    await update.message.reply_text(f"✅ Промокод {code} удалён.")
 
 async def add_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
+        target_id = int(context.args[0])
         amount = float(context.args[1])
-    except:
-        await update.message.reply_text("/addbalance <user_id|@username> <amount>")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /addbalance <user_id> <amount>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.update_user_balance(db_conn, target['user_id'], amount)
-    await db.log_admin_action(db_conn, update.effective_user.id, "add_balance", target['user_id'], f"{amount}")
-    await update.message.reply_text(f"✅ Баланс {target['user_id']} пополнен на {amount} ⭐")
+    await db.update_user_balance(db_conn, target_id, amount)
+    await db.log_admin_action(db_conn, user_id, "add_balance", target_id, f"сумма: {amount}")
+    await update.message.reply_text(f"✅ Баланс пользователя {target_id} пополнен на {amount} ⭐")
 
 async def set_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
+        target_id = int(context.args[0])
         amount = float(context.args[1])
-    except:
-        await update.message.reply_text("/setbalance <user_id|@username> <amount>")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /setbalance <user_id> <amount>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.set_user_balance(db_conn, target['user_id'], amount)
-    await db.log_admin_action(db_conn, update.effective_user.id, "set_balance", target['user_id'], f"{amount}")
-    await update.message.reply_text(f"✅ Баланс {target['user_id']} установлен на {amount} ⭐")
+    await db.set_user_balance(db_conn, target_id, amount)
+    await db.log_admin_action(db_conn, user_id, "set_balance", target_id, f"новый баланс: {amount}")
+    await update.message.reply_text(f"✅ Баланс пользователя {target_id} установлен на {amount} ⭐")
 
 async def ban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
+        target_id = int(context.args[0])
         reason = ' '.join(context.args[1:]) or "Не указана"
-    except:
-        await update.message.reply_text("/ban <user_id|@username> <причина>")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /ban <user_id> <причина>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.add_ban(db_conn, target['user_id'], reason, update.effective_user.id)
-    await db.log_admin_action(db_conn, update.effective_user.id, "ban", target['user_id'], reason)
-    await update.message.reply_text(f"✅ {target['user_id']} забанен: {reason}")
+    await db.add_ban(db_conn, target_id, reason, user_id)
+    await db.log_admin_action(db_conn, user_id, "ban", target_id, reason)
+    await update.message.reply_text(f"✅ Пользователь {target_id} забанен. Причина: {reason}")
 
 async def unban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
-    except:
-        await update.message.reply_text("/unban <user_id|@username>")
+        target_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /unban <user_id>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.remove_ban(db_conn, target['user_id'])
-    await db.log_admin_action(db_conn, update.effective_user.id, "unban", target['user_id'])
-    await update.message.reply_text(f"✅ {target['user_id']} разбанен.")
+    await db.remove_ban(db_conn, target_id)
+    await db.log_admin_action(db_conn, user_id, "unban", target_id)
+    await update.message.reply_text(f"✅ Пользователь {target_id} разбанен.")
 
 async def mute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
+        target_id = int(context.args[0])
         minutes = int(context.args[1])
         reason = ' '.join(context.args[2:]) or "Не указана"
-    except:
-        await update.message.reply_text("/mute <user_id|@username> <минуты> <причина>")
-        return
-    db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /mute <user_id> <минуты> <причина>")
         return
     until = (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).isoformat()
-    await db.add_mute(db_conn, target['user_id'], until, reason, update.effective_user.id)
-    await db.log_admin_action(db_conn, update.effective_user.id, "mute", target['user_id'], f"{minutes} мин: {reason}")
-    await update.message.reply_text(f"✅ {target['user_id']} замучен на {minutes} мин.")
+    db_conn = context.bot_data['db']
+    await db.add_mute(db_conn, target_id, until, reason, user_id)
+    await db.log_admin_action(db_conn, user_id, "mute", target_id, f"{minutes} мин: {reason}")
+    await update.message.reply_text(f"✅ Пользователь {target_id} замучен на {minutes} мин. Причина: {reason}")
 
 async def unmute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
-    except:
-        await update.message.reply_text("/unmute <user_id|@username>")
+        target_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /unmute <user_id>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.remove_mute(db_conn, target['user_id'])
-    await db.log_admin_action(db_conn, update.effective_user.id, "unmute", target['user_id'])
-    await update.message.reply_text(f"✅ {target['user_id']} размучен.")
+    await db.remove_mute(db_conn, target_id)
+    await db.log_admin_action(db_conn, user_id, "unmute", target_id)
+    await update.message.reply_text(f"✅ Пользователь {target_id} размучен.")
 
 async def warn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
+        target_id = int(context.args[0])
         reason = ' '.join(context.args[1:]) or "Не указана"
-    except:
-        await update.message.reply_text("/warn <user_id|@username> <причина>")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /warn <user_id> <причина>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    await db.add_warning(db_conn, target['user_id'], reason, update.effective_user.id)
-    await db.log_admin_action(db_conn, update.effective_user.id, "warn", target['user_id'], reason)
-    await update.message.reply_text(f"⚠️ {target['user_id']} предупреждён: {reason}")
+    await db.add_warning(db_conn, target_id, reason, user_id)
+    await db.log_admin_action(db_conn, user_id, "warn", target_id, reason)
+    await update.message.reply_text(f"⚠️ Пользователь {target_id} получил предупреждение: {reason}")
 
 async def unwarn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
-    except:
-        await update.message.reply_text("/unwarn <user_id|@username>")
+        target_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /unwarn <user_id>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
-        return
-    if await db.remove_last_warning(db_conn, target['user_id']):
-        await db.log_admin_action(db_conn, update.effective_user.id, "unwarn", target['user_id'])
-        await update.message.reply_text(f"✅ Снято предупреждение с {target['user_id']}")
+    success = await db.remove_last_warning(db_conn, target_id)
+    if success:
+        await db.log_admin_action(db_conn, user_id, "unwarn", target_id)
+        await update.message.reply_text(f"✅ Предупреждение снято с {target_id}.")
     else:
-        await update.message.reply_text("Нет предупреждений.")
+        await update.message.reply_text("❌ Нет предупреждений.")
 
 async def vip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
-    try:
-        arg = context.args[0]
-        days = int(context.args[1])
-    except:
-        await update.message.reply_text("/vip <user_id|@username> <дни>")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
-    db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
+    try:
+        target_id = int(context.args[0])
+        days = int(context.args[1])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /vip <user_id> <дни>")
         return
     until = (datetime.datetime.now() + datetime.timedelta(days=days)).isoformat()
-    await db.set_vip(db_conn, target['user_id'], until, update.effective_user.id)
-    await db.log_admin_action(db_conn, update.effective_user.id, "vip", target['user_id'], f"{days} дней")
-    await update.message.reply_text(f"⭐ {target['user_id']} VIP на {days} дней.")
+    db_conn = context.bot_data['db']
+    await db.set_vip(db_conn, target_id, until, user_id)
+    await db.log_admin_action(db_conn, user_id, "vip", target_id, f"{days} дней")
+    await update.message.reply_text(f"⭐ Пользователю {target_id} выдан VIP на {days} дней.")
 
 async def unvip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return await update.message.reply_text("⛔ Доступ запрещён.")
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
     try:
-        arg = context.args[0]
-    except:
-        await update.message.reply_text("/unvip <user_id|@username>")
+        target_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /unvip <user_id>")
         return
     db_conn = context.bot_data['db']
-    target = await find_user_by_arg(db_conn, arg)
-    if not target:
-        await update.message.reply_text("❌ Пользователь не найден.")
+    await db.remove_vip(db_conn, target_id)
+    await db.log_admin_action(db_conn, user_id, "unvip", target_id)
+    await update.message.reply_text(f"✅ VIP снят с {target_id}.")
+
+# -------- Остальные команды --------
+async def promo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("Используйте: /promo <код>")
         return
-    await db.remove_vip(db_conn, target['user_id'])
-    await db.log_admin_action(db_conn, update.effective_user.id, "unvip", target['user_id'])
-    await update.message.reply_text(f"✅ VIP снят с {target['user_id']}.")
+    code = context.args[0].upper()
+    db_conn = context.bot_data['db']
+    success = await db.use_promo_code_db(db_conn, code, user_id)
+    if success:
+        promo = await db.get_promo_code(db_conn, code)
+        await update.message.reply_text(f"✅ Промокод активирован! Начислено {promo['amount']} ⭐")
+    else:
+        await update.message.reply_text("❌ Недействительный или уже использованный промокод.")
 
-# ... другие команды (stats, system_info, clear_logs, reset_weekly) без изменений,
-# но теперь везде используется find_user_by_arg
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    db_conn = context.bot_data['db']
+    total_users = await db.get_total_users(db_conn)
+    total_balance = await db.get_total_balance(db_conn)
+    total_deposited = await db.get_total_deposited(db_conn)
+    total_games = await db.get_total_games(db_conn)
+    total_wins = await db.get_total_wins(db_conn)
+    text = (
+        f"📊 Статистика\n"
+        f"Пользователей: {total_users}\n"
+        f"Баланс всего: {round(total_balance,1)} ⭐\n"
+        f"Пополнено: {round(total_deposited,1)} ⭐\n"
+        f"Игр: {total_games}\n"
+        f"Побед: {total_wins}"
+    )
+    await update.message.reply_text(text)
 
+async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    import psutil
+    process = psutil.Process()
+    memory = process.memory_info()
+    text = (
+        "⚙️ Системная информация\n"
+        f"PID: {process.pid}\n"
+        f"Память: {memory.rss // 1024 // 1024} MB\n"
+        f"CPU: {psutil.cpu_percent(interval=1)}%\n"
+        f"Диск: {psutil.disk_usage('/').percent}%"
+    )
+    await update.message.reply_text(text)
+
+async def clear_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    db_conn = context.bot_data['db']
+    await db.clear_logs_db(db_conn)
+    await db.log_admin_action(db_conn, user_id, "clear_logs")
+    await update.message.reply_text("✅ Логи очищены.")
+
+async def reset_weekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    db_conn = context.bot_data['db']
+    await db_conn.execute("UPDATE activity SET weekly_streak_days=0, weekly_total_bets=0, weekly_total_games=0, daily_games_count=0")
+    await db_conn.commit()
+    await db.log_admin_action(db_conn, user_id, "reset_weekly")
+    await update.message.reply_text("✅ Недельные данные сброшены у всех пользователей.")
+
+# -------- Главная функция --------
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1265,28 +1362,28 @@ def main():
     application.bot_data['db'] = db_conn
     application.bot_data['in_game'] = set()
 
-    # Установка подсказок команд
     async def set_bot_commands(app):
         commands = [
             ("start", "Начать"),
             ("help", "Помощь"),
             ("profile", "Профиль"),
-            ("play", "Игры"),
             ("deposit", "Пополнить"),
             ("withdraw", "Вывести"),
             ("promo", "Активировать промокод"),
             ("bet", "Изменить ставку"),
-            ("activity", "Активность")
+            ("activity", "Активность"),
+            ("admin", "Админ-панель")
         ]
         await app.bot.set_my_commands(commands)
     loop.run_until_complete(set_bot_commands(application))
 
-    # Регистрация обработчиков (дубликаты убраны)
+    # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("activity", activity_command))
     application.add_handler(CommandHandler("bet", bet_command))
+    application.add_handler(CommandHandler("promo", promo_command))
     application.add_handler(CommandHandler("deposit", deposit_command))
 
     application.add_handler(CallbackQueryHandler(profile, pattern="^profile$"))
