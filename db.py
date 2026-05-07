@@ -110,7 +110,8 @@ async def init_db():
             combination TEXT,
             gift_count INTEGER,
             status TEXT DEFAULT 'pending',
-            created_at TEXT
+            created_at TEXT,
+            source TEXT DEFAULT 'balance'
         );
 
         CREATE TABLE IF NOT EXISTS admin_logs (
@@ -281,7 +282,6 @@ async def create_user_if_not_exists(db: aiosqlite.Connection, user_id: int,
         """, (user_id, today, today))
         await db.commit()
     else:
-        # Обновляем username, если он изменился
         if username:
             await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
             await db.commit()
@@ -344,11 +344,28 @@ async def set_user_referrer(db: aiosqlite.Connection, user_id: int, referrer_id:
     await db.commit()
 
 async def add_referral_earnings(db: aiosqlite.Connection, referrer_id: int, amount: float):
+    """Начисляет реферальное вознаграждение на отдельный реферальный баланс."""
     await db.execute("""
-    UPDATE users SET referral_earnings = referral_earnings + ?,
-                     game_balance = game_balance + ?
+    UPDATE users SET referral_earnings = referral_earnings + ?
     WHERE user_id = ?
-    """, (amount, amount, referrer_id))
+    """, (amount, referrer_id))
+    await db.commit()
+
+async def transfer_referral_earnings(db: aiosqlite.Connection, user_id: int, amount: float):
+    """Переносит реферальный баланс на игровой."""
+    await db.execute("""
+    UPDATE users SET referral_earnings = referral_earnings - ?,
+                     game_balance = game_balance + ?
+    WHERE user_id = ? AND referral_earnings >= ?
+    """, (amount, amount, user_id, amount))
+    await db.commit()
+
+async def update_referral_balance(db: aiosqlite.Connection, user_id: int, delta: float):
+    """Изменяет реферальный баланс (для списания при выводе)."""
+    await db.execute("""
+    UPDATE users SET referral_earnings = referral_earnings + ?
+    WHERE user_id = ?
+    """, (delta, user_id))
     await db.commit()
 
 # ================== НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ==================
@@ -520,18 +537,23 @@ async def get_vip(db: aiosqlite.Connection, user_id: int):
 
 async def create_withdrawal_request(db: aiosqlite.Connection, user_id: int,
                                     amount: float, combination: dict,
-                                    gift_count: int) -> int:
+                                    gift_count: int, source: str = 'balance') -> int:
     cursor = await db.execute("""
-    INSERT INTO withdrawal_requests (user_id, amount, combination, gift_count, status, created_at)
-    VALUES (?, ?, ?, ?, 'pending', ?)
-    """, (user_id, amount, json.dumps(combination), gift_count, datetime.now().isoformat()))
+    INSERT INTO withdrawal_requests (user_id, amount, combination, gift_count, status, created_at, source)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    """, (user_id, amount, json.dumps(combination), gift_count, datetime.now().isoformat(), source))
     await db.commit()
     return cursor.lastrowid
 
-async def get_pending_withdrawals(db: aiosqlite.Connection):
-    rows = await db.execute("""
-    SELECT * FROM withdrawal_requests WHERE status = 'pending' ORDER BY created_at
-    """)
+async def get_pending_withdrawals(db: aiosqlite.Connection, source: str = None):
+    if source:
+        rows = await db.execute("""
+        SELECT * FROM withdrawal_requests WHERE status = 'pending' AND source = ? ORDER BY created_at
+        """, (source,))
+    else:
+        rows = await db.execute("""
+        SELECT * FROM withdrawal_requests WHERE status = 'pending' ORDER BY created_at
+        """)
     return await rows.fetchall()
 
 async def mark_withdrawal_done(db: aiosqlite.Connection, request_id: int):
