@@ -592,6 +592,9 @@ async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def dice_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    # Игнорируем сообщения от самого бота
+    if message.from_user.is_bot:
+        return
     user_id = message.from_user.id
     db_conn = context.bot_data['db']
     restriction = await check_ban_mute(user_id, db_conn)
@@ -1382,9 +1385,7 @@ def main():
     application.add_handler(PreCheckoutQueryHandler(pre_checkout))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
 
-    bot_id = application.bot.id
-    application.add_handler(MessageHandler(filters.Dice.ALL & ~filters.User(bot_id), dice_message_handler))
-
+    application.add_handler(MessageHandler(filters.Dice.ALL, dice_message_handler))
     application.add_handler(CommandHandler("addbalance", add_balance_admin))
     application.add_handler(CommandHandler("setbalance", set_balance_admin))
     application.add_handler(CommandHandler("ban", ban_admin))
