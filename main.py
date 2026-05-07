@@ -958,6 +958,22 @@ async def admin_users_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db_conn = context.bot_data['db']
+    requests = await db.get_pending_withdrawals(db_conn)
+    if not requests:
+        text = "Нет ожидающих заявок."
+    else:
+        text = "📤 Заявки на вывод:\n\n"
+        for req in requests:
+            combo = json.loads(req['combination'])
+            combo_text = ", ".join([f"{cnt}x{val}⭐" for val, cnt in combo.items()])
+            text += f"ID: {req['id']}\nПользователь: {req['user_id']}\nСумма: {req['amount']} ⭐\nСостав: {combo_text}\nДата: {req['created_at'][:16]}\n\n"
+    keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def admin_find_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
