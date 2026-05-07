@@ -24,6 +24,7 @@ async def init_db():
         await db.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
+            username TEXT,
             game_balance REAL DEFAULT 0.0,
             total_games INTEGER DEFAULT 0,
             total_wins INTEGER DEFAULT 0,
@@ -44,8 +45,7 @@ async def init_db():
             used_promo_codes TEXT DEFAULT '[]',
             muted_until TEXT,
             warnings TEXT DEFAULT '[]',
-            vip_until TEXT,
-            username TEXT
+            vip_until TEXT
         );
 
         CREATE TABLE IF NOT EXISTS activity (
@@ -124,13 +124,6 @@ async def init_db():
         """)
         await db.commit()
 
-        # Попытка добавить колонку username, если её нет (для старых баз)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
-            await db.commit()
-        except aiosqlite.OperationalError:
-            pass  # колонка уже есть
-
         if DATA_JSON_PATH.exists():
             await _migrate_from_json(db)
             DATA_JSON_PATH.rename(DATA_JSON_PATH.with_suffix('.backup'))
@@ -144,18 +137,19 @@ async def _migrate_from_json(db: aiosqlite.Connection):
     with open(DATA_JSON_PATH, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    # users
+    # users (добавлено поле username – берём None, в старой базе его нет)
     for uid_str, udata in data.get('user_data', {}).items():
         uid = int(uid_str)
         await db.execute("""
         INSERT OR REPLACE INTO users (
-            user_id, game_balance, total_games, total_wins, total_deposited, real_money_spent,
+            user_id, username, game_balance, total_games, total_wins, total_deposited, real_money_spent,
             current_bet, registration_date, last_activity, slots_mode, win_streak, max_win_streak,
             mega_wins_count, total_mega_win_amount, referral_code, referral_by, referrals_count,
-            referral_earnings, used_promo_codes, muted_until, warnings, vip_until, username
+            referral_earnings, used_promo_codes, muted_until, warnings, vip_until
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             uid,
+            udata.get('username'),  # может быть None
             udata.get('game_balance', 0),
             udata.get('total_games', 0),
             udata.get('total_wins', 0),
@@ -176,8 +170,7 @@ async def _migrate_from_json(db: aiosqlite.Connection):
             json.dumps(udata.get('used_promo_codes', [])),
             udata.get('muted_until'),
             json.dumps(udata.get('warnings', [])),
-            udata.get('vip_until'),
-            udata.get('username')  # на случай, если в JSON был username
+            udata.get('vip_until')
         ))
 
     # activity
@@ -270,8 +263,8 @@ async def _migrate_from_json(db: aiosqlite.Connection):
 # ================== ПОЛЬЗОВАТЕЛИ ==================
 
 async def create_user_if_not_exists(db: aiosqlite.Connection, user_id: int,
-                                    referral_code: str = None, referral_by: int = None,
-                                    username: str = None):
+                                    username: str = None, referral_code: str = None,
+                                    referral_by: int = None):
     """Создать пользователя, если его нет, и вернуть его данные."""
     now = datetime.now().isoformat()
     today = datetime.now().date().isoformat()
@@ -279,9 +272,9 @@ async def create_user_if_not_exists(db: aiosqlite.Connection, user_id: int,
     user = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if not await user.fetchone():
         await db.execute("""
-        INSERT INTO users (user_id, registration_date, last_activity, referral_code, referral_by, username)
+        INSERT INTO users (user_id, username, registration_date, last_activity, referral_code, referral_by)
         VALUES (?, ?, ?, ?, ?, ?)
-        """, (user_id, now, now, referral_code, referral_by, username))
+        """, (user_id, username, now, now, referral_code, referral_by))
         await db.execute("""
         INSERT INTO activity (user_id, last_activity_date, current_week_start)
         VALUES (?, ?, ?)
@@ -301,14 +294,12 @@ async def get_user(db: aiosqlite.Connection, user_id: int):
     return await row.fetchone()
 
 async def get_user_by_username(db: aiosqlite.Connection, username: str):
-    """Поиск пользователя по username (без @)."""
-    clean_name = username.lstrip('@').lower()
-    row = await db.execute("SELECT * FROM users WHERE LOWER(username) = ?", (clean_name,))
+    """Поиск пользователя по имени (без @)."""
+    clean = username.lstrip('@')
+    row = await db.execute("SELECT * FROM users WHERE username = ?", (clean,))
     return await row.fetchone()
 
-async def get_user_activity(db: aiosqlite.Connection, user_id: int):
-    row = await db.execute("SELECT * FROM activity WHERE user_id = ?", (user_id,))
-    return await row.fetchone()
+# ================== БАЛАНС И СТАТИСТИКА ==================
 
 async def update_user_balance(db: aiosqlite.Connection, user_id: int, delta: float):
     await db.execute("UPDATE users SET game_balance = round(game_balance + ?, 1) WHERE user_id = ?",
@@ -340,6 +331,8 @@ async def update_user_deposit(db: aiosqlite.Connection, user_id: int, amount: fl
     """, (amount, real_amount, user_id))
     await db.commit()
 
+# ================== РЕФЕРАЛЬНАЯ СИСТЕМА ==================
+
 async def update_user_referral_code(db: aiosqlite.Connection, user_id: int, code: str):
     await db.execute("UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id))
     await db.execute("INSERT OR REPLACE INTO referral_codes (code, user_id) VALUES (?, ?)", (code, user_id))
@@ -357,6 +350,8 @@ async def add_referral_earnings(db: aiosqlite.Connection, referrer_id: int, amou
     WHERE user_id = ?
     """, (amount, amount, referrer_id))
     await db.commit()
+
+# ================== НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ==================
 
 async def update_user_slots_mode(db: aiosqlite.Connection, user_id: int, mode: str):
     await db.execute("UPDATE users SET slots_mode = ? WHERE user_id = ?", (mode, user_id))
@@ -390,6 +385,10 @@ async def add_used_promo_code(db: aiosqlite.Connection, user_id: int, code: str)
     await db.commit()
 
 # ================== АКТИВНОСТЬ ==================
+
+async def get_user_activity(db: aiosqlite.Connection, user_id: int):
+    row = await db.execute("SELECT * FROM activity WHERE user_id = ?", (user_id,))
+    return await row.fetchone()
 
 async def update_activity(db: aiosqlite.Connection, user_id: int, updates: dict):
     sets = ", ".join([f"{k} = ?" for k in updates])
@@ -561,7 +560,7 @@ async def clear_logs_db(db: aiosqlite.Connection):
     await db.execute("DELETE FROM admin_logs")
     await db.commit()
 
-# ================== СТАТИСТИКА (для админа) ==================
+# ================== СТАТИСТИКА ==================
 
 async def get_total_users(db: aiosqlite.Connection):
     row = await db.execute("SELECT COUNT(*) as cnt FROM users")
