@@ -1,0 +1,4 @@
+python-telegram-bot[all]==20.8
+aiosqlite==0.20.0
+psutil==5.9.8
+python-dotenv==1.0.1
