@@ -9,7 +9,6 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, filters, PreCheckoutQueryHandler, ConversationHandler
 )
-from telegram.error import BadRequest
 import aiosqlite
 import db
 
@@ -26,16 +25,8 @@ MIN_BET = 1
 MAX_BET = 1_000_000_000
 MIN_WITHDRAWAL = 15
 
-CUSTOM_DEPOSIT_CONFIG = {
-    "min_amount": 1,
-    "max_amount": 1_000_000,
-    "step": 1
-}
-
-DICE_DELAYS = {
-    "🎰": 1.2, "🎯": 2.2, "🎲": 2.2,
-    "🎳": 3.3, "⚽": 3.3, "🏀": 3.3
-}
+CUSTOM_DEPOSIT_CONFIG = {"min_amount": 1, "max_amount": 1_000_000, "step": 1}
+DICE_DELAYS = {"🎰": 1.2, "🎯": 2.2, "🎲": 2.2, "🎳": 3.3, "⚽": 3.3, "🏀": 3.3}
 REFUND_CONFIG = {"min_refund": 0.02, "max_refund": 0.1}
 MEGA_WIN_CONFIG = {"chance": 0.006, "min_multiplier": 1.5, "max_multiplier": 5.0}
 WEEKLY_BONUS_CONFIG = {
@@ -46,13 +37,13 @@ REFERRAL_CONFIG = {"reward_percent": 0.10, "min_referee_games": 3, "min_referee_
 PROMO_CONFIG = {"max_active_promos": 50, "default_uses": 100, "min_amount": 5, "max_amount": 1000}
 
 PRODUCTS = {
-    "pack_5":    {"title": "5 ⭐", "description": "Пополнение на 5 ⭐", "price": 5, "currency": "XTR", "credits": 5},
-    "pack_10":   {"title": "10 ⭐", "description": "Пополнение на 10 ⭐", "price": 10, "currency": "XTR", "credits": 10},
-    "pack_25":   {"title": "25 ⭐", "description": "Пополнение на 25 ⭐", "price": 25, "currency": "XTR", "credits": 25},
-    "pack_50":   {"title": "50 ⭐", "description": "Пополнение на 50 ⭐", "price": 50, "currency": "XTR", "credits": 50},
-    "pack_100":  {"title": "100 ⭐", "description": "Пополнение на 100 ⭐", "price": 100, "currency": "XTR", "credits": 100},
-    "pack_250":  {"title": "250 ⭐", "description": "Пополнение на 250 ⭐", "price": 250, "currency": "XTR", "credits": 250},
-    "pack_500":  {"title": "500 ⭐", "description": "Пополнение на 500 ⭐", "price": 500, "currency": "XTR", "credits": 500},
+    "pack_5": {"title": "5 ⭐", "description": "Пополнение на 5 ⭐", "price": 5, "currency": "XTR", "credits": 5},
+    "pack_10": {"title": "10 ⭐", "description": "Пополнение на 10 ⭐", "price": 10, "currency": "XTR", "credits": 10},
+    "pack_25": {"title": "25 ⭐", "description": "Пополнение на 25 ⭐", "price": 25, "currency": "XTR", "credits": 25},
+    "pack_50": {"title": "50 ⭐", "description": "Пополнение на 50 ⭐", "price": 50, "currency": "XTR", "credits": 50},
+    "pack_100": {"title": "100 ⭐", "description": "Пополнение на 100 ⭐", "price": 100, "currency": "XTR", "credits": 100},
+    "pack_250": {"title": "250 ⭐", "description": "Пополнение на 250 ⭐", "price": 250, "currency": "XTR", "credits": 250},
+    "pack_500": {"title": "500 ⭐", "description": "Пополнение на 500 ⭐", "price": 500, "currency": "XTR", "credits": 500},
     "pack_1000": {"title": "1000 ⭐", "description": "Пополнение на 1000 ⭐", "price": 1000, "currency": "XTR", "credits": 1000}
 }
 
@@ -100,7 +91,7 @@ for emoji, prizes in BASE_PRIZES.items():
                          "message": f"{emoji} {name}. {'Выигрыш' if win else 'Возврат'}: {{prize}} ⭐"}
         GAMES_CONFIG[emoji] = {"values": values}
 
-WAITING_CUSTOM_AMOUNT, CONFIRM_CUSTOM_AMOUNT, WAITING_WITHDRAW_AMOUNT, CONFIRM_WITHDRAW, WAITING_SEARCH_USER = range(5)
+WAITING_CUSTOM_AMOUNT, CONFIRM_CUSTOM_AMOUNT, WAITING_WITHDRAW_AMOUNT, CONFIRM_WITHDRAW, WAITING_SEARCH_USER, WAITING_PROMO_AMOUNT, WAITING_PROMO_USES = range(7)
 
 class GiftCalculator:
     def __init__(self):
@@ -310,16 +301,17 @@ async def update_weekly_activity(db_conn, user_id, bet):
     })
     return None
 
-# -------- команды --------
+# ---------- Команды ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username
     db_conn = context.bot_data['db']
     restriction = await check_ban_mute(user_id, db_conn)
     if restriction:
         await update.message.reply_text(restriction)
         return
     ref_code = context.args[0] if context.args else None
-    user = await db.create_user_if_not_exists(db_conn, user_id)
+    user = await db.create_user_if_not_exists(db_conn, user_id, username=username)
     if ref_code and not user['referral_by']:
         row = await db_conn.execute("SELECT user_id FROM referral_codes WHERE code = ?", (ref_code,))
         ref_row = await row.fetchone()
@@ -346,6 +338,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💸 Вывести", callback_data="withdraw")],
     ]
     await update.message.reply_text(welcome, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db_conn = context.bot_data['db']
+    user = await db.get_user(db_conn, user_id)
+    if not user:
+        await update.message.reply_text("Сначала зарегистрируйтесь через /start")
+        return
+    balance = round(user['game_balance'], 1)
+    bet = user['current_bet']
+    slots_mode = user['slots_mode']
+    text = (
+        f"🎮 Игры\n\n"
+        f"💰 Баланс: {balance} ⭐\n"
+        f"🎯 Ставка: {bet} ⭐\n"
+        f"🎰 Режим слотов: {'Обычный' if slots_mode == 'normal' else '777'}\n\n"
+        f"Выберите игру или киньте эмодзи в чат:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🎰 Слоты", callback_data="play_slots"),
+         InlineKeyboardButton("🎰 777", callback_data="play_777")],
+        [InlineKeyboardButton("🎯 Дартс", callback_data="play_darts"),
+         InlineKeyboardButton("🎲 Кубик", callback_data="play_dice")],
+        [InlineKeyboardButton("🎳 Боулинг", callback_data="play_bowling"),
+         InlineKeyboardButton("⚽ Футбол", callback_data="play_football")],
+        [InlineKeyboardButton("🏀 Баскетбол", callback_data="play_basket")],
+        [InlineKeyboardButton("🔙 Профиль", callback_data="profile")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -393,8 +414,10 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     act = await db.get_user_activity(db_conn, user_id)
     streak = act['weekly_streak_days'] if act else 0
     winrate = (user_data['total_wins'] / user_data['total_games'] * 100) if user_data['total_games'] > 0 else 0
+    username = user_data['username'] or "нет"
     text = (
         f"📊 Профиль\n\n"
+        f"👤 Имя: @{username}\n"
         f"🆔 ID: {user_id}\n"
         f"💰 Баланс: {round(user_data['game_balance'], 1)} ⭐\n"
         f"🎯 Ставка: {user_data['current_bet']} ⭐\n"
@@ -465,6 +488,7 @@ async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Введите целое число.")
 
+# ---------- Игры ----------
 async def play_games_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -581,7 +605,7 @@ async def dice_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await asyncio.sleep(DICE_DELAYS[emoji])
     await process_dice_result(user_id, emoji, message.dice.value, bet, message, context)
 
-# -------- Пополнение --------
+# ---------- Пополнение ----------
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -717,7 +741,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_user_deposit(db_conn, user_id, credits, amount)
     await update.message.reply_text(f"✅ Платёж успешен! Зачислено {credits} ⭐")
 
-# -------- Вывод средств --------
+# ---------- Вывод ----------
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -872,7 +896,7 @@ async def cancel_withdraw_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text("❌ Вывод отменён.")
     return ConversationHandler.END
 
-# -------- Реферальная система --------
+# ---------- Реферальная система ----------
 async def referral_system_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -896,7 +920,7 @@ async def referral_system_callback(update: Update, context: ContextTypes.DEFAULT
     keyboard = [[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# -------- Админ-панель --------
+# ---------- Админ-панель ----------
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -911,6 +935,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
          InlineKeyboardButton("📋 Все пользователи", callback_data="admin_all_users")],
         [InlineKeyboardButton("💰 Выводы", callback_data="admin_withdrawals"),
          InlineKeyboardButton("🎁 Промокоды", callback_data="admin_promo")],
+        [InlineKeyboardButton("➕ Создать промокод", callback_data="admin_create_promo")],
         [InlineKeyboardButton("📋 Логи", callback_data="admin_logs"),
          InlineKeyboardButton("🔙 Профиль", callback_data="profile")]
     ]
@@ -1018,7 +1043,7 @@ async def admin_find_user_start(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    await query.edit_message_text("🔍 Введите ID пользователя:",
+    await query.edit_message_text("🔍 Введите ID или @username пользователя:",
                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]]))
     return WAITING_SEARCH_USER
 
@@ -1028,18 +1053,19 @@ async def admin_find_user_execute(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
     db_conn = context.bot_data['db']
     query_text = update.message.text.strip()
+    target = None
     try:
         target_id = int(query_text)
         target = await db.get_user(db_conn, target_id)
     except ValueError:
-        await update.message.reply_text("❌ Некорректный ID.")
-        return ConversationHandler.END
+        target = await db.get_user_by_username(db_conn, query_text)
     if not target:
         await update.message.reply_text("❌ Пользователь не найден.")
         return ConversationHandler.END
-    act = await db.get_user_activity(db_conn, target['user_id'])
+    username = target['username'] or "нет"
     info = (
-        f"👤 Пользователь ID: {target['user_id']}\n"
+        f"👤 Пользователь: @{username}\n"
+        f"🆔 ID: {target['user_id']}\n"
         f"💰 Баланс: {round(target['game_balance'], 1)} ⭐\n"
         f"🎮 Игр: {target['total_games']} | Побед: {target['total_wins']}\n"
         f"📅 Регистрация: {target['registration_date'][:10]}\n"
@@ -1057,60 +1083,70 @@ async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(query.from_user.id):
         return
     db_conn = context.bot_data['db']
-    rows = await (await db_conn.execute("SELECT user_id, game_balance FROM users LIMIT 50")).fetchall()
+    rows = await (await db_conn.execute("SELECT user_id, username, game_balance FROM users LIMIT 50")).fetchall()
     if not rows:
         text = "Нет пользователей."
     else:
         text = "👥 Список пользователей (первые 50):\n\n"
         for row in rows:
-            text += f"ID: {row['user_id']} | Баланс: {round(row['game_balance'],1)} ⭐\n"
+            uname = row['username'] or f"id{row['user_id']}"
+            text += f"@{uname} | ID: {row['user_id']} | Баланс: {round(row['game_balance'],1)} ⭐\n"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]))
 
-# -------- Админские команды --------
-async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
+# ---------- Создание промокода через админ-панель ----------
+async def admin_create_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
         return
-    db_conn = context.bot_data['db']
-    try:
-        amount = int(context.args[0])
-        uses = int(context.args[1])
-        broadcast_text = ' '.join(context.args[2:]) if len(context.args) > 2 else None
-    except (IndexError, ValueError):
-        await update.message.reply_text("Используйте: /promo_create <amount> <uses> [текст рассылки]")
-        return
-    if amount < PROMO_CONFIG['min_amount'] or amount > PROMO_CONFIG['max_amount']:
-        await update.message.reply_text(f"Сумма должна быть от {PROMO_CONFIG['min_amount']} до {PROMO_CONFIG['max_amount']}")
-        return
-    code = f"PROMO{random.randint(10000,99999)}"
-    await db.create_promo_code_db(db_conn, code, amount, uses, user_id)
-    await db.log_admin_action(db_conn, user_id, "promo_create", details=f"код: {code}, сумма: {amount}, исп.: {uses}")
-    await update.message.reply_text(f"✅ Промокод создан: {code} (сумма {amount}, использований {uses})")
-    if broadcast_text:
-        rows = await (await db_conn.execute("SELECT user_id FROM users")).fetchall()
-        msg = f"🚀 Новый промокод: {code}\nСумма: {amount} ⭐\n{broadcast_text}"
-        for u in rows:
-            try:
-                await context.bot.send_message(u['user_id'], msg)
-                await asyncio.sleep(0.05)
-            except:
-                pass
+    await query.edit_message_text("Введите сумму промокода:",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]]))
+    return WAITING_PROMO_AMOUNT
 
-async def promo_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
-        return
+async def admin_create_promo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        code = context.args[0].upper()
-    except IndexError:
-        await update.message.reply_text("Используйте: /promo_delete <код>")
-        return
+        amount = int(update.message.text)
+        if not (PROMO_CONFIG['min_amount'] <= amount <= PROMO_CONFIG['max_amount']):
+            await update.message.reply_text(f"Сумма должна быть от {PROMO_CONFIG['min_amount']} до {PROMO_CONFIG['max_amount']}")
+            return WAITING_PROMO_AMOUNT
+    except ValueError:
+        await update.message.reply_text("Введите целое число.")
+        return WAITING_PROMO_AMOUNT
+    context.user_data['promo_amount'] = amount
+    await update.message.reply_text("Введите количество использований:")
+    return WAITING_PROMO_USES
+
+async def admin_create_promo_uses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        uses = int(update.message.text)
+        if uses < 1:
+            await update.message.reply_text("Введите положительное число.")
+            return WAITING_PROMO_USES
+    except ValueError:
+        await update.message.reply_text("Введите целое число.")
+        return WAITING_PROMO_USES
+    amount = context.user_data['promo_amount']
     db_conn = context.bot_data['db']
-    await db.delete_promo_code_db(db_conn, code)
-    await db.log_admin_action(db_conn, user_id, "promo_delete", details=f"код: {code}")
-    await update.message.reply_text(f"✅ Промокод {code} удалён.")
+    code = f"PROMO{random.randint(10000,99999)}"
+    await db.create_promo_code_db(db_conn, code, amount, uses, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "promo_create", details=f"код: {code}, сумма: {amount}, исп.: {uses}")
+    await update.message.reply_text(f"✅ Промокод создан: {code}\nСумма: {amount} ⭐\nИспользований: {uses}")
+    return ConversationHandler.END
+
+# ---------- Админские команды ----------
+async def promo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("Используйте: /promo <код>")
+        return
+    code = context.args[0].upper()
+    db_conn = context.bot_data['db']
+    success = await db.use_promo_code_db(db_conn, code, user_id)
+    if success:
+        promo = await db.get_promo_code(db_conn, code)
+        await update.message.reply_text(f"✅ Промокод активирован! Начислено {promo['amount']} ⭐")
+    else:
+        await update.message.reply_text("❌ Недействительный или уже использованный промокод.")
 
 async def add_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1274,20 +1310,50 @@ async def unvip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.log_admin_action(db_conn, user_id, "unvip", target_id)
     await update.message.reply_text(f"✅ VIP снят с {target_id}.")
 
-# -------- Остальные команды --------
-async def promo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Используйте: /promo <код>")
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
-    code = context.args[0].upper()
     db_conn = context.bot_data['db']
-    success = await db.use_promo_code_db(db_conn, code, user_id)
-    if success:
-        promo = await db.get_promo_code(db_conn, code)
-        await update.message.reply_text(f"✅ Промокод активирован! Начислено {promo['amount']} ⭐")
-    else:
-        await update.message.reply_text("❌ Недействительный или уже использованный промокод.")
+    try:
+        amount = int(context.args[0])
+        uses = int(context.args[1])
+        broadcast_text = ' '.join(context.args[2:]) if len(context.args) > 2 else None
+    except (IndexError, ValueError):
+        await update.message.reply_text("Используйте: /promo_create <amount> <uses> [текст рассылки]")
+        return
+    if amount < PROMO_CONFIG['min_amount'] or amount > PROMO_CONFIG['max_amount']:
+        await update.message.reply_text(f"Сумма должна быть от {PROMO_CONFIG['min_amount']} до {PROMO_CONFIG['max_amount']}")
+        return
+    code = f"PROMO{random.randint(10000,99999)}"
+    await db.create_promo_code_db(db_conn, code, amount, uses, user_id)
+    await db.log_admin_action(db_conn, user_id, "promo_create", details=f"код: {code}, сумма: {amount}, исп.: {uses}")
+    await update.message.reply_text(f"✅ Промокод создан: {code} (сумма {amount}, использований {uses})")
+    if broadcast_text:
+        rows = await (await db_conn.execute("SELECT user_id FROM users")).fetchall()
+        msg = f"🚀 Новый промокод: {code}\nСумма: {amount} ⭐\n{broadcast_text}"
+        for u in rows:
+            try:
+                await context.bot.send_message(u['user_id'], msg)
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+async def promo_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    try:
+        code = context.args[0].upper()
+    except IndexError:
+        await update.message.reply_text("Используйте: /promo_delete <код>")
+        return
+    db_conn = context.bot_data['db']
+    await db.delete_promo_code_db(db_conn, code)
+    await db.log_admin_action(db_conn, user_id, "promo_delete", details=f"код: {code}")
+    await update.message.reply_text(f"✅ Промокод {code} удалён.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1348,7 +1414,7 @@ async def reset_weekly_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await db.log_admin_action(db_conn, user_id, "reset_weekly")
     await update.message.reply_text("✅ Недельные данные сброшены у всех пользователей.")
 
-# -------- Главная функция --------
+# ---------- MAIN ----------
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1367,18 +1433,19 @@ def main():
             ("start", "Начать"),
             ("help", "Помощь"),
             ("profile", "Профиль"),
+            ("play", "Игры"),
             ("deposit", "Пополнить"),
             ("withdraw", "Вывести"),
             ("promo", "Активировать промокод"),
             ("bet", "Изменить ставку"),
-            ("activity", "Активность"),
-            ("admin", "Админ-панель")
+            ("activity", "Активность")
         ]
         await app.bot.set_my_commands(commands)
     loop.run_until_complete(set_bot_commands(application))
 
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("activity", activity_command))
@@ -1403,6 +1470,7 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_find_user_start, pattern="^admin_find_user$"))
     application.add_handler(CallbackQueryHandler(admin_all_users, pattern="^admin_all_users$"))
 
+    # ConversationHandler: кастомное пополнение
     conv_custom = ConversationHandler(
         entry_points=[CallbackQueryHandler(custom_deposit_callback, pattern="^custom_deposit$")],
         states={
@@ -1414,6 +1482,7 @@ def main():
     )
     application.add_handler(conv_custom)
 
+    # ConversationHandler: вывод
     conv_withdraw = ConversationHandler(
         entry_points=[
             CommandHandler("withdraw", withdraw_start),
@@ -1428,6 +1497,7 @@ def main():
     )
     application.add_handler(conv_withdraw)
 
+    # ConversationHandler: поиск пользователя
     conv_search = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_find_user_start, pattern="^admin_find_user$")],
         states={
@@ -1436,6 +1506,17 @@ def main():
         fallbacks=[CallbackQueryHandler(admin_panel_callback, pattern="^admin_panel$")],
     )
     application.add_handler(conv_search)
+
+    # ConversationHandler: создание промокода
+    conv_promo_create = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_create_promo_start, pattern="^admin_create_promo$")],
+        states={
+            WAITING_PROMO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_promo_amount)],
+            WAITING_PROMO_USES: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_promo_uses)]
+        },
+        fallbacks=[CallbackQueryHandler(admin_panel_callback, pattern="^admin_panel$")],
+    )
+    application.add_handler(conv_promo_create)
 
     application.add_handler(PreCheckoutQueryHandler(pre_checkout))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
