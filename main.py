@@ -33,7 +33,7 @@ WEEKLY_BONUS_CONFIG = {
     "min_daily_games": 5, "required_days": 7,
     "base_percent": 0.01, "bonus_per_extra_game": 0.0005, "max_extra_bonus": 0.02
 }
-REFERRAL_CONFIG = {"reward_percent": 0.10, "min_referee_games": 3, "min_referee_deposit": 10}
+REFERRAL_CONFIG = {"reward_percent": 0.10}
 PROMO_CONFIG = {"max_active_promos": 50, "default_uses": 100, "min_amount": 5, "max_amount": 1000}
 
 PRODUCTS = {
@@ -225,20 +225,20 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         if bonus_msgs:
             full_msg += "\n\n" + "\n".join(bonus_msgs)
         await message.reply_text(full_msg)
+        # ---------- ИСПРАВЛЕННАЯ РЕФЕРАЛЬНАЯ СИСТЕМА (без условий min_games и min_deposit) ----------
         if not is_admin(user_id) and user['referral_by']:
             referrer = await db.get_user(db_conn, user['referral_by'])
-            if referrer and referrer['total_games'] >= REFERRAL_CONFIG["min_referee_games"] \
-                    and referrer['total_deposited'] >= REFERRAL_CONFIG["min_referee_deposit"]:
+            if referrer:
                 loss = max(0, bet - prize)
                 if loss > 0:
                     ref_reward = round(loss * REFERRAL_CONFIG["reward_percent"], 1)
-                    # Начисляем только на реферальный баланс, не на игровой
                     await db.add_referral_earnings(db_conn, user['referral_by'], ref_reward)
                     try:
                         await context.bot.send_message(user['referral_by'],
                                                        f"👥 Вы получили {ref_reward} ⭐ на реферальный баланс за проигрыш друга.")
                     except:
                         pass
+        # --------------------------------------------------------------------------------------------
         weekly_bonus = await update_weekly_activity(db_conn, user_id, bet)
         if weekly_bonus:
             await context.bot.send_message(user_id,
@@ -941,10 +941,8 @@ async def ref_to_balance_callback(update: Update, context: ContextTypes.DEFAULT_
     if amount <= 0:
         await query.answer("Нет средств для вывода.", show_alert=True)
         return
-    # Переносим на игровой баланс
     await db.transfer_referral_earnings(db_conn, user_id, amount)
     await query.edit_message_text(f"✅ {amount} ⭐ переведено на игровой баланс!")
-    # Обновим информацию
     await referral_system_callback(update, context)
 
 async def ref_withdraw_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1039,7 +1037,6 @@ async def confirm_ref_withdraw_callback(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Недостаточно средств на реферальном балансе.")
         return ConversationHandler.END
 
-    # Списываем с referral_earnings
     await db.update_referral_balance(db_conn, user_id, -amount)
     gift_count = sum(combo.values())
     request_id = await db.create_withdrawal_request(db_conn, user_id, amount, combo, gift_count, source='referral')
@@ -1214,7 +1211,6 @@ async def admin_find_user_start(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    # Сбросим другие состояния, чтобы сообщение точно попало сюда
     context.user_data.clear()
     await query.edit_message_text("🔍 Введите ID или @username пользователя:",
                                   reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]]))
@@ -1663,7 +1659,6 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_clear_logs_callback, pattern="^admin_clear_logs$"))
     application.add_handler(CallbackQueryHandler(admin_find_user_start, pattern="^admin_find_user$"))
     application.add_handler(CallbackQueryHandler(admin_all_users, pattern="^admin_all_users$"))
-    # Новые кнопки реферальной системы
     application.add_handler(CallbackQueryHandler(ref_to_balance_callback, pattern="^ref_to_balance$"))
     application.add_handler(CallbackQueryHandler(ref_withdraw_start_callback, pattern="^ref_withdraw_start$"))
 
