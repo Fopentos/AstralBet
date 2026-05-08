@@ -24,7 +24,6 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("
 MIN_BET = 1
 MAX_BET = 1_000_000_000
 MIN_WITHDRAWAL = 15
-WITHDRAW_COOLDOWN_HOURS = 1
 
 CUSTOM_DEPOSIT_CONFIG = {"min_amount": 1, "max_amount": 1_000_000, "step": 1}
 DICE_DELAYS = {"🎰": 1.2, "🎯": 2.2, "🎲": 2.2, "🎳": 3.3, "⚽": 3.3, "🏀": 3.3}
@@ -93,7 +92,6 @@ for emoji, prizes in BASE_PRIZES.items():
                          "message": f"{emoji} {name}. {'Выигрыш' if win else 'Возврат'}: {{prize}} ⭐"}
         GAMES_CONFIG[emoji] = {"values": values}
 
-# Отдельная конфигурация для слотов 777 (только джекпот с x50)
 SLOTS_777_CONFIG = {
     "🎰": {
         "values": {
@@ -244,7 +242,7 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         if bonus_msgs:
             full_msg += "\n\n" + "\n".join(bonus_msgs)
 
-        # Кнопка "Играть снова" (исправлено: callback_data без лишних символов)
+        # Кнопка "Играть снова"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🔄 Играть снова ({emoji})", callback_data=f"play_again_{emoji}")]
         ])
@@ -673,6 +671,7 @@ async def play_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user_id in context.bot_data.get('in_game', set()):
         await query.answer("⏳ Дождитесь завершения предыдущей игры!", show_alert=True)
         return
+    # Извлекаем emoji
     emoji = query.data.replace("play_again_", "", 1)
     if emoji not in GAMES_CONFIG and emoji != "🎰":
         return
@@ -847,7 +846,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_user_deposit(db_conn, user_id, credits, amount)
     await update.message.reply_text(f"✅ Платёж успешен! Зачислено {credits} ⭐")
 
-# ---------- Вывод (исправлено: убраны внешние обработчики, всё внутри ConversationHandler) ----------
+# ---------- ВЫВОД (кулдаун убран, всё просто) ----------
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -861,17 +860,6 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await db.get_user(db_conn, user_id)
         if not user:
             return ConversationHandler.END
-        last_time_str = user.get('last_withdraw_time')
-        if last_time_str:
-            last_time = datetime.datetime.fromisoformat(last_time_str)
-            if datetime.datetime.now() < last_time + datetime.timedelta(hours=WITHDRAW_COOLDOWN_HOURS):
-                remaining = last_time + datetime.timedelta(hours=WITHDRAW_COOLDOWN_HOURS) - datetime.datetime.now()
-                await query.edit_message_text(
-                    f"⏳ Заявку на вывод можно создавать раз в {WITHDRAW_COOLDOWN_HOURS} час(а).\n"
-                    f"Повторите через {str(remaining).split('.')[0]}.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]])
-                )
-                return ConversationHandler.END
         balance = round(user['game_balance'], 1)
         if balance < MIN_WITHDRAWAL:
             await query.edit_message_text(
@@ -899,16 +887,6 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = await db.get_user(db_conn, user_id)
         if not user:
             return ConversationHandler.END
-        last_time_str = user.get('last_withdraw_time')
-        if last_time_str:
-            last_time = datetime.datetime.fromisoformat(last_time_str)
-            if datetime.datetime.now() < last_time + datetime.timedelta(hours=WITHDRAW_COOLDOWN_HOURS):
-                remaining = last_time + datetime.timedelta(hours=WITHDRAW_COOLDOWN_HOURS) - datetime.datetime.now()
-                await update.message.reply_text(
-                    f"⏳ Заявку на вывод можно создавать раз в {WITHDRAW_COOLDOWN_HOURS} час(а).\n"
-                    f"Повторите через {str(remaining).split('.')[0]}."
-                )
-                return ConversationHandler.END
         balance = round(user['game_balance'], 1)
         if balance < MIN_WITHDRAWAL:
             await update.message.reply_text(f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL} ⭐\nВаш баланс: {balance} ⭐")
@@ -990,17 +968,9 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("Недостаточно средств.")
         return ConversationHandler.END
 
-    last_time_str = user.get('last_withdraw_time')
-    if last_time_str:
-        last_time = datetime.datetime.fromisoformat(last_time_str)
-        if datetime.datetime.now() < last_time + datetime.timedelta(hours=WITHDRAW_COOLDOWN_HOURS):
-            await query.edit_message_text("⏳ Слишком частая заявка. Попробуйте позже.")
-            return ConversationHandler.END
-
     await db.update_user_balance(db_conn, user_id, -amount)
     gift_count = sum(combo.values())
     request_id = await db.create_withdrawal_request(db_conn, user_id, amount, combo, gift_count, source='balance')
-    await db.set_last_withdraw_time(db_conn, user_id, datetime.datetime.now().isoformat())
 
     user_info = query.from_user
     username = user_info.username or f"id{user_id}"
@@ -1661,7 +1631,7 @@ def main():
         await app.bot.set_my_commands(commands)
     loop.run_until_complete(set_bot_commands(application))
 
-    # Регистрация обработчиков (без лишних колбэков для withdraw)
+    # Регистрация обработчиков (без дублирования)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -1704,7 +1674,7 @@ def main():
     )
     application.add_handler(conv_custom)
 
-    # ConversationHandler для вывода (единственный вход)
+    # ConversationHandler для вывода (все входы здесь)
     conv_withdraw = ConversationHandler(
         entry_points=[
             CommandHandler("withdraw", withdraw_start),
