@@ -58,6 +58,7 @@ BASE_PRIZES = {
           "ТРЕХОЧКОВЫЙ": 2.0, "СЛЭМ-ДАНК": 2.0}
 }
 
+# Генерация GAMES_CONFIG (обычные слоты)
 GAMES_CONFIG = {}
 for emoji, prizes in BASE_PRIZES.items():
     if emoji == "🎰":
@@ -91,9 +92,19 @@ for emoji, prizes in BASE_PRIZES.items():
                          "message": f"{emoji} {name}. {'Выигрыш' if win else 'Возврат'}: {{prize}} ⭐"}
         GAMES_CONFIG[emoji] = {"values": values}
 
+# Отдельная конфигурация для слотов 777 (только джекпот с x50)
+SLOTS_777_CONFIG = {
+    "🎰": {
+        "values": {
+            64: {"win": True, "base_prize": 50, "message": "🎰 ДЖЕКПОТ 777! МЕГА ВЫИГРЫШ: {prize} ⭐"}
+        }
+    }
+}
+for i in range(1, 64):
+    SLOTS_777_CONFIG["🎰"]["values"][i] = {"win": False, "base_prize": 0, "message": f"🎰 Комбинация #{i} - проигрыш. Возврат: {{prize}} ⭐"}
+
 WAITING_CUSTOM_AMOUNT, CONFIRM_CUSTOM_AMOUNT, WAITING_WITHDRAW_AMOUNT, CONFIRM_WITHDRAW, \
-WAITING_SEARCH_USER, WAITING_PROMO_AMOUNT, WAITING_PROMO_USES, \
-WAITING_REF_WITHDRAW_AMOUNT, CONFIRM_REF_WITHDRAW, WAITING_DELETE_PROMO = range(10)
+WAITING_SEARCH_USER, WAITING_PROMO_AMOUNT, WAITING_PROMO_USES, WAITING_DELETE_PROMO = range(8)
 
 class GiftCalculator:
     def __init__(self):
@@ -181,12 +192,19 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         if restriction:
             await message.reply_text(restriction)
             return
-        config = GAMES_CONFIG.get(emoji)
+
+        # Выбор конфигурации в зависимости от режима слотов
+        if emoji == "🎰" and user['slots_mode'] == '777':
+            config = SLOTS_777_CONFIG.get(emoji)
+        else:
+            config = GAMES_CONFIG.get(emoji)
+
         if not config:
             return
         result = config["values"].get(value)
         if not result:
             result = {"win": False, "base_prize": 0, "message": f"{emoji} - проигрыш. Возврат: {{prize}} ⭐"}
+
         base_prize = result["base_prize"]
         is_win = result["win"]
         prize = base_prize * bet
@@ -225,7 +243,8 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         if bonus_msgs:
             full_msg += "\n\n" + "\n".join(bonus_msgs)
         await message.reply_text(full_msg)
-        # ---------- ИСПРАВЛЕННАЯ РЕФЕРАЛЬНАЯ СИСТЕМА (без условий min_games и min_deposit) ----------
+
+        # Начисление реферального вознаграждения (без уведомления)
         if not is_admin(user_id) and user['referral_by']:
             referrer = await db.get_user(db_conn, user['referral_by'])
             if referrer:
@@ -233,12 +252,7 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
                 if loss > 0:
                     ref_reward = round(loss * REFERRAL_CONFIG["reward_percent"], 1)
                     await db.add_referral_earnings(db_conn, user['referral_by'], ref_reward)
-                    try:
-                        await context.bot.send_message(user['referral_by'],
-                                                       f"👥 Вы получили {ref_reward} ⭐ на реферальный баланс за проигрыш друга.")
-                    except:
-                        pass
-        # --------------------------------------------------------------------------------------------
+
         weekly_bonus = await update_weekly_activity(db_conn, user_id, bet)
         if weekly_bonus:
             await context.bot.send_message(user_id,
@@ -596,7 +610,7 @@ async def dice_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not user:
         return
     emoji = message.dice.emoji
-    if emoji not in GAMES_CONFIG:
+    if emoji not in GAMES_CONFIG and emoji != "🎰":
         return
     if user_id in context.bot_data.setdefault('in_game', set()):
         return
@@ -899,7 +913,7 @@ async def cancel_withdraw_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text("❌ Вывод отменён.")
     return ConversationHandler.END
 
-# ---------- Реферальная система ----------
+# ---------- Реферальная система (упрощённая) ----------
 async def referral_system_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -919,11 +933,11 @@ async def referral_system_callback(update: Update, context: ContextTypes.DEFAULT
         f"Приглашено: {user['referrals_count']}\n"
         f"Реферальный баланс: {ref_balance} ⭐\n"
         f"Ссылка для приглашения:\n{referral_link}\n\n"
-        f"Вы получаете 10% от проигрышей приглашённых друзей."
+        f"Вы получаете 10% от проигрышей приглашённых друзей.\n"
+        f"Выведите реферальный баланс на игровой и закажите вывод подарками через обычное меню."
     )
     keyboard = [
         [InlineKeyboardButton("💸 Вывести на игровой баланс", callback_data="ref_to_balance")],
-        [InlineKeyboardButton("🎁 Заказать вывод подарками", callback_data="ref_withdraw_start")],
         [InlineKeyboardButton("🔙 Профиль", callback_data="profile")]
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -945,131 +959,6 @@ async def ref_to_balance_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(f"✅ {amount} ⭐ переведено на игровой баланс!")
     await referral_system_callback(update, context)
 
-async def ref_withdraw_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    db_conn = context.bot_data['db']
-    user = await db.get_user(db_conn, user_id)
-    if not user:
-        return
-    ref_balance = round(user['referral_earnings'], 1)
-    if ref_balance < MIN_WITHDRAWAL:
-        await query.edit_message_text(
-            f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL} ⭐\nРеферальный баланс: {ref_balance} ⭐",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Рефералы", callback_data="referral_system")]])
-        )
-        return
-    text = (
-        f"💸 Вывод реферальных средств\n\n"
-        f"Доступно: {ref_balance} ⭐\n"
-        f"Минимум: {MIN_WITHDRAWAL} ⭐\n"
-        f"Сумма должна быть кратна 5 и раскладываться на подарки 15/25/50/100.\n"
-        f"Введите сумму для вывода:"
-    )
-    await query.edit_message_text(text)
-    context.user_data['awaiting_ref_withdraw'] = True
-    return WAITING_REF_WITHDRAW_AMOUNT
-
-async def ref_withdraw_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_ref_withdraw'):
-        return ConversationHandler.END
-    user_id = update.effective_user.id
-    db_conn = context.bot_data['db']
-    user = await db.get_user(db_conn, user_id)
-    try:
-        amount = int(update.message.text)
-    except ValueError:
-        await update.message.reply_text("❌ Введите целое число.")
-        return WAITING_REF_WITHDRAW_AMOUNT
-
-    if amount < MIN_WITHDRAWAL:
-        await update.message.reply_text(f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL} ⭐")
-        return WAITING_REF_WITHDRAW_AMOUNT
-    if amount > user['referral_earnings']:
-        await update.message.reply_text("❌ Недостаточно средств на реферальном балансе.")
-        return WAITING_REF_WITHDRAW_AMOUNT
-    if amount % 5 != 0:
-        await update.message.reply_text("❌ Сумма должна быть кратна 5.")
-        return WAITING_REF_WITHDRAW_AMOUNT
-
-    if not gift_calculator.can_withdraw_amount(amount):
-        suggestions = gift_calculator.get_suggested_amounts(amount, 3)
-        sug_text = "\n".join([f"• {s} ⭐" for s in suggestions])
-        await update.message.reply_text(
-            f"❌ Сумма {amount} ⭐ не может быть собрана из подарков.\n"
-            f"Ближайшие доступные суммы:\n{sug_text}\n"
-            f"Введите ещё раз:"
-        )
-        return WAITING_REF_WITHDRAW_AMOUNT
-
-    combination = gift_calculator.find_best_combination(amount)
-    gift_count = sum(combination.values())
-    context.user_data['ref_withdraw_amount'] = amount
-    context.user_data['ref_withdraw_combo'] = combination
-    combo_text = " + ".join([f"{cnt}×{val}⭐" for val, cnt in combination.items()])
-    text = (
-        f"📦 Заявка на вывод {amount} ⭐ (реферальный баланс)\n"
-        f"Подарков: {gift_count} шт.\n"
-        f"Комбинация: {combo_text}\n\n"
-        f"Подтвердите списание с реферального баланса."
-    )
-    keyboard = [
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_ref_withdraw")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_ref_withdraw")]
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return CONFIRM_REF_WITHDRAW
-
-async def confirm_ref_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    db_conn = context.bot_data['db']
-    amount = context.user_data.get('ref_withdraw_amount')
-    combo = context.user_data.get('ref_withdraw_combo')
-    if not amount or not combo:
-        await query.edit_message_text("Ошибка данных.")
-        return ConversationHandler.END
-
-    user = await db.get_user(db_conn, user_id)
-    if not user or user['referral_earnings'] < amount:
-        await query.edit_message_text("Недостаточно средств на реферальном балансе.")
-        return ConversationHandler.END
-
-    await db.update_referral_balance(db_conn, user_id, -amount)
-    gift_count = sum(combo.values())
-    request_id = await db.create_withdrawal_request(db_conn, user_id, amount, combo, gift_count, source='referral')
-
-    user_info = query.from_user
-    username = user_info.username or f"id{user_id}"
-    mention = f"@{username}" if user_info.username else f"[пользователь](tg://user?id={user_id})"
-    await query.edit_message_text(
-        f"✅ Заявка #{request_id} создана!\n"
-        f"Сумма: {amount} ⭐ списана с реферального баланса.\n"
-        f"Ожидайте отправки {gift_count} подарков администратором."
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(
-                admin_id,
-                f"🔔 Новая реферальная заявка на вывод #{request_id}\n"
-                f"Пользователь: {mention}\n"
-                f"Сумма: {amount} ⭐\n"
-                f"Подарки: {combo}"
-            )
-        except:
-            pass
-
-    return ConversationHandler.END
-
-async def cancel_ref_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Вывод отменён.")
-    return ConversationHandler.END
-
 # ---------- Админ-панель ----------
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1083,11 +972,10 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
          InlineKeyboardButton("👥 Пользователи", callback_data="admin_users_info")],
         [InlineKeyboardButton("🔍 Поиск пользователя", callback_data="admin_find_user"),
          InlineKeyboardButton("📋 Все пользователи", callback_data="admin_all_users")],
-        [InlineKeyboardButton("💰 Выводы (игровые)", callback_data="admin_withdrawals"),
+        [InlineKeyboardButton("💰 Выводы", callback_data="admin_withdrawals"),
          InlineKeyboardButton("🎁 Промокоды", callback_data="admin_promo")],
         [InlineKeyboardButton("➕ Создать промокод", callback_data="admin_create_promo"),
          InlineKeyboardButton("🗑️ Удалить промокод", callback_data="admin_delete_promo")],
-        [InlineKeyboardButton("👥 Реферальные выводы", callback_data="admin_ref_withdrawals")],
         [InlineKeyboardButton("📋 Логи", callback_data="admin_logs"),
          InlineKeyboardButton("🔙 Профиль", callback_data="profile")]
     ]
@@ -1141,23 +1029,7 @@ async def admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not requests:
         text = "Нет ожидающих заявок."
     else:
-        text = "📤 Заявки на вывод (игровой баланс):\n\n"
-        for req in requests:
-            combo = json.loads(req['combination'])
-            combo_text = ", ".join([f"{cnt}x{val}⭐" for val, cnt in combo.items()])
-            text += f"ID: {req['id']}\nПользователь: {req['user_id']}\nСумма: {req['amount']} ⭐\nСостав: {combo_text}\nДата: {req['created_at'][:16]}\n\n"
-    keyboard = [[InlineKeyboardButton("🔙 Админ-панель", callback_data="admin_panel")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_ref_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    db_conn = context.bot_data['db']
-    requests = await db.get_pending_withdrawals(db_conn, source='referral')
-    if not requests:
-        text = "Нет ожидающих реферальных заявок."
-    else:
-        text = "👥 Заявки на вывод (реферальный баланс):\n\n"
+        text = "📤 Заявки на вывод:\n\n"
         for req in requests:
             combo = json.loads(req['combination'])
             combo_text = ", ".join([f"{cnt}x{val}⭐" for val, cnt in combo.items()])
@@ -1653,14 +1525,12 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     application.add_handler(CallbackQueryHandler(admin_users_info, pattern="^admin_users_info$"))
     application.add_handler(CallbackQueryHandler(admin_withdrawals, pattern="^admin_withdrawals$"))
-    application.add_handler(CallbackQueryHandler(admin_ref_withdrawals, pattern="^admin_ref_withdrawals$"))
     application.add_handler(CallbackQueryHandler(admin_promo, pattern="^admin_promo$"))
     application.add_handler(CallbackQueryHandler(admin_logs, pattern="^admin_logs$"))
     application.add_handler(CallbackQueryHandler(admin_clear_logs_callback, pattern="^admin_clear_logs$"))
     application.add_handler(CallbackQueryHandler(admin_find_user_start, pattern="^admin_find_user$"))
     application.add_handler(CallbackQueryHandler(admin_all_users, pattern="^admin_all_users$"))
     application.add_handler(CallbackQueryHandler(ref_to_balance_callback, pattern="^ref_to_balance$"))
-    application.add_handler(CallbackQueryHandler(ref_withdraw_start_callback, pattern="^ref_withdraw_start$"))
 
     # ConversationHandler: кастомное пополнение
     conv_custom = ConversationHandler(
@@ -1688,18 +1558,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_withdraw_callback)],
     )
     application.add_handler(conv_withdraw)
-
-    # ConversationHandler: вывод с реферального баланса
-    conv_ref_withdraw = ConversationHandler(
-        entry_points=[CallbackQueryHandler(ref_withdraw_start_callback, pattern="^ref_withdraw_start$")],
-        states={
-            WAITING_REF_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ref_withdraw_amount_input)],
-            CONFIRM_REF_WITHDRAW: [CallbackQueryHandler(confirm_ref_withdraw_callback, pattern="^confirm_ref_withdraw$"),
-                                   CallbackQueryHandler(cancel_ref_withdraw_callback, pattern="^cancel_ref_withdraw$")]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_ref_withdraw_callback)],
-    )
-    application.add_handler(conv_ref_withdraw)
 
     # ConversationHandler: поиск пользователя
     conv_search = ConversationHandler(
