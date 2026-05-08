@@ -45,7 +45,8 @@ async def init_db():
             used_promo_codes TEXT DEFAULT '[]',
             muted_until TEXT,
             warnings TEXT DEFAULT '[]',
-            vip_until TEXT
+            vip_until TEXT,
+            last_withdraw_time TEXT
         );
 
         CREATE TABLE IF NOT EXISTS activity (
@@ -111,7 +112,8 @@ async def init_db():
             gift_count INTEGER,
             status TEXT DEFAULT 'pending',
             created_at TEXT,
-            source TEXT DEFAULT 'balance'
+            source TEXT DEFAULT 'balance',
+            reject_reason TEXT
         );
 
         CREATE TABLE IF NOT EXISTS admin_logs (
@@ -146,8 +148,8 @@ async def _migrate_from_json(db: aiosqlite.Connection):
             user_id, username, game_balance, total_games, total_wins, total_deposited, real_money_spent,
             current_bet, registration_date, last_activity, slots_mode, win_streak, max_win_streak,
             mega_wins_count, total_mega_win_amount, referral_code, referral_by, referrals_count,
-            referral_earnings, used_promo_codes, muted_until, warnings, vip_until
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            referral_earnings, used_promo_codes, muted_until, warnings, vip_until, last_withdraw_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             uid,
             udata.get('username'),  # может быть None
@@ -171,7 +173,8 @@ async def _migrate_from_json(db: aiosqlite.Connection):
             json.dumps(udata.get('used_promo_codes', [])),
             udata.get('muted_until'),
             json.dumps(udata.get('warnings', [])),
-            udata.get('vip_until')
+            udata.get('vip_until'),
+            udata.get('last_withdraw_time')  # может быть None
         ))
 
     # activity
@@ -344,7 +347,7 @@ async def set_user_referrer(db: aiosqlite.Connection, user_id: int, referrer_id:
     await db.commit()
 
 async def add_referral_earnings(db: aiosqlite.Connection, referrer_id: int, amount: float):
-    """Начисляет реферальное вознаграждение на отдельный реферальный баланс."""
+    """Начисляет реферальное вознаграждение на реферальный баланс."""
     await db.execute("""
     UPDATE users SET referral_earnings = referral_earnings + ?
     WHERE user_id = ?
@@ -360,13 +363,14 @@ async def transfer_referral_earnings(db: aiosqlite.Connection, user_id: int, amo
     """, (amount, amount, user_id, amount))
     await db.commit()
 
-async def update_referral_balance(db: aiosqlite.Connection, user_id: int, delta: float):
-    """Изменяет реферальный баланс (для списания при выводе)."""
-    await db.execute("""
-    UPDATE users SET referral_earnings = referral_earnings + ?
-    WHERE user_id = ?
-    """, (delta, user_id))
-    await db.commit()
+async def count_active_referrals(db: aiosqlite.Connection, user_id: int) -> int:
+    """Возвращает количество рефералов, которые сыграли >=1 игру."""
+    row = await db.execute(
+        "SELECT COUNT(*) as cnt FROM users WHERE referral_by = ? AND total_games > 0",
+        (user_id,)
+    )
+    result = await row.fetchone()
+    return result['cnt'] if result else 0
 
 # ================== НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ==================
 
@@ -556,10 +560,31 @@ async def get_pending_withdrawals(db: aiosqlite.Connection, source: str = None):
         """)
     return await rows.fetchall()
 
+async def get_withdrawal_request(db: aiosqlite.Connection, request_id: int):
+    row = await db.execute("SELECT * FROM withdrawal_requests WHERE id = ?", (request_id,))
+    return await row.fetchone()
+
+async def get_user_withdrawals(db: aiosqlite.Connection, user_id: int):
+    rows = await db.execute(
+        "SELECT * FROM withdrawal_requests WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,)
+    )
+    return await rows.fetchall()
+
 async def mark_withdrawal_done(db: aiosqlite.Connection, request_id: int):
     await db.execute("""
     UPDATE withdrawal_requests SET status = 'completed' WHERE id = ?
     """, (request_id,))
+    await db.commit()
+
+async def reject_withdrawal_request(db: aiosqlite.Connection, request_id: int, reason: str):
+    await db.execute("""
+    UPDATE withdrawal_requests SET status = 'rejected', reject_reason = ? WHERE id = ?
+    """, (reason, request_id))
+    await db.commit()
+
+async def set_last_withdraw_time(db: aiosqlite.Connection, user_id: int, time_str: str):
+    await db.execute("UPDATE users SET last_withdraw_time = ? WHERE user_id = ?", (time_str, user_id))
     await db.commit()
 
 # ================== ЛОГИ АДМИНОВ ==================
