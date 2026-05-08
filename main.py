@@ -244,7 +244,7 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         if bonus_msgs:
             full_msg += "\n\n" + "\n".join(bonus_msgs)
 
-        # Кнопка "Играть снова"
+        # Кнопка "Играть снова" (исправлено: callback_data без лишних символов)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🔄 Играть снова ({emoji})", callback_data=f"play_again_{emoji}")]
         ])
@@ -670,11 +670,10 @@ async def play_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = await db.get_user(db_conn, user_id)
     if not user:
         return
-    if user_id in context.bot_data.setdefault('in_game', set()):
+    if user_id in context.bot_data.get('in_game', set()):
         await query.answer("⏳ Дождитесь завершения предыдущей игры!", show_alert=True)
         return
-    # Извлекаем эмодзи из callback_data
-    emoji = query.data.replace("play_again_", "")
+    emoji = query.data.replace("play_again_", "", 1)
     if emoji not in GAMES_CONFIG and emoji != "🎰":
         return
     bet = user['current_bet']
@@ -848,7 +847,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_user_deposit(db_conn, user_id, credits, amount)
     await update.message.reply_text(f"✅ Платёж успешен! Зачислено {credits} ⭐")
 
-# ---------- Вывод (исправлено: убран дублирующий обработчик, теперь только внутри ConversationHandler) ----------
+# ---------- Вывод (исправлено: убраны внешние обработчики, всё внутри ConversationHandler) ----------
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -858,11 +857,10 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         restriction = await check_ban_mute(user_id, db_conn)
         if restriction:
             await query.edit_message_text(restriction)
-            return
+            return ConversationHandler.END
         user = await db.get_user(db_conn, user_id)
         if not user:
-            return
-        # Проверка кулдауна
+            return ConversationHandler.END
         last_time_str = user.get('last_withdraw_time')
         if last_time_str:
             last_time = datetime.datetime.fromisoformat(last_time_str)
@@ -873,7 +871,7 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Повторите через {str(remaining).split('.')[0]}.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]])
                 )
-                return ConversationHandler.END  # не входим в состояние
+                return ConversationHandler.END
         balance = round(user['game_balance'], 1)
         if balance < MIN_WITHDRAWAL:
             await query.edit_message_text(
@@ -897,10 +895,10 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         restriction = await check_ban_mute(user_id, db_conn)
         if restriction:
             await update.message.reply_text(restriction)
-            return
+            return ConversationHandler.END
         user = await db.get_user(db_conn, user_id)
         if not user:
-            return
+            return ConversationHandler.END
         last_time_str = user.get('last_withdraw_time')
         if last_time_str:
             last_time = datetime.datetime.fromisoformat(last_time_str)
@@ -992,7 +990,6 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("Недостаточно средств.")
         return ConversationHandler.END
 
-    # Дополнительная проверка кулдауна
     last_time_str = user.get('last_withdraw_time')
     if last_time_str:
         last_time = datetime.datetime.fromisoformat(last_time_str)
@@ -1003,7 +1000,6 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
     await db.update_user_balance(db_conn, user_id, -amount)
     gift_count = sum(combo.values())
     request_id = await db.create_withdrawal_request(db_conn, user_id, amount, combo, gift_count, source='balance')
-
     await db.set_last_withdraw_time(db_conn, user_id, datetime.datetime.now().isoformat())
 
     user_info = query.from_user
@@ -1665,7 +1661,7 @@ def main():
         await app.bot.set_my_commands(commands)
     loop.run_until_complete(set_bot_commands(application))
 
-    # Регистрация обработчиков (без дублирования для withdraw)
+    # Регистрация обработчиков (без лишних колбэков для withdraw)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -1708,7 +1704,7 @@ def main():
     )
     application.add_handler(conv_custom)
 
-    # ConversationHandler: вывод (единственный источник входа)
+    # ConversationHandler для вывода (единственный вход)
     conv_withdraw = ConversationHandler(
         entry_points=[
             CommandHandler("withdraw", withdraw_start),
