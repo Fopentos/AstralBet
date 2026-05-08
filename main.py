@@ -24,7 +24,7 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("
 MIN_BET = 1
 MAX_BET = 1_000_000_000
 MIN_WITHDRAWAL = 15
-WITHDRAW_COOLDOWN_HOURS = 1  # задержка между заявками на вывод
+WITHDRAW_COOLDOWN_HOURS = 1
 
 CUSTOM_DEPOSIT_CONFIG = {"min_amount": 1, "max_amount": 1_000_000, "step": 1}
 DICE_DELAYS = {"🎰": 1.2, "🎯": 2.2, "🎲": 2.2, "🎳": 3.3, "⚽": 3.3, "🏀": 3.3}
@@ -104,7 +104,6 @@ SLOTS_777_CONFIG = {
 for i in range(1, 64):
     SLOTS_777_CONFIG["🎰"]["values"][i] = {"win": False, "base_prize": 0, "message": f"🎰 Комбинация #{i} - проигрыш. Возврат: {{prize}} ⭐"}
 
-# Состояния для ConversationHandler
 WAITING_CUSTOM_AMOUNT, CONFIRM_CUSTOM_AMOUNT, WAITING_WITHDRAW_AMOUNT, CONFIRM_WITHDRAW, \
 WAITING_SEARCH_USER, WAITING_PROMO_AMOUNT, WAITING_PROMO_USES, \
 WAITING_DELETE_PROMO, WAITING_REJECT_REASON = range(9)
@@ -196,7 +195,6 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
             await message.reply_text(restriction)
             return
 
-        # Выбор конфигурации в зависимости от режима слотов
         if emoji == "🎰" and user['slots_mode'] == '777':
             config = SLOTS_777_CONFIG.get(emoji)
         else:
@@ -245,9 +243,14 @@ async def process_dice_result(user_id: int, emoji: str, value: int, bet: int,
         full_msg = f"{result_msg}\n\n💰 Баланс: {balance} ⭐"
         if bonus_msgs:
             full_msg += "\n\n" + "\n".join(bonus_msgs)
-        await message.reply_text(full_msg)
 
-        # Начисление реферального вознаграждения (тихо)
+        # Кнопка "Играть снова"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔄 Играть снова ({emoji})", callback_data=f"play_again_{emoji}")]
+        ])
+        await message.reply_text(full_msg, reply_markup=keyboard)
+
+        # Реферальное вознаграждение (тихо)
         if not is_admin(user_id) and user['referral_by']:
             referrer = await db.get_user(db_conn, user['referral_by'])
             if referrer:
@@ -568,7 +571,7 @@ async def bet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Введите целое число.")
 
-# ---------- Игры ----------
+# ---------- Игры (включая кнопку "Играть снова") ----------
 async def play_games_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -653,6 +656,30 @@ async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TY
     bet = user['current_bet']
     if not is_admin(user_id) and user['game_balance'] < bet:
         await query.edit_message_text("❌ Недостаточно средств!")
+        return
+    context.bot_data.setdefault('in_game', set()).add(user_id)
+    dice_msg = await context.bot.send_dice(query.message.chat_id, emoji=emoji)
+    await asyncio.sleep(DICE_DELAYS[emoji])
+    await process_dice_result(user_id, emoji, dice_msg.dice.value, bet, dice_msg, context)
+
+async def play_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    db_conn = context.bot_data['db']
+    user = await db.get_user(db_conn, user_id)
+    if not user:
+        return
+    if user_id in context.bot_data.setdefault('in_game', set()):
+        await query.answer("⏳ Дождитесь завершения предыдущей игры!", show_alert=True)
+        return
+    # Извлекаем эмодзи из callback_data
+    emoji = query.data.replace("play_again_", "")
+    if emoji not in GAMES_CONFIG and emoji != "🎰":
+        return
+    bet = user['current_bet']
+    if not is_admin(user_id) and user['game_balance'] < bet:
+        await query.edit_message_text("❌ Недостаточно средств для повторной игры!")
         return
     context.bot_data.setdefault('in_game', set()).add(user_id)
     dice_msg = await context.bot.send_dice(query.message.chat_id, emoji=emoji)
@@ -821,7 +848,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_user_deposit(db_conn, user_id, credits, amount)
     await update.message.reply_text(f"✅ Платёж успешен! Зачислено {credits} ⭐")
 
-# ---------- Вывод ----------
+# ---------- Вывод (исправлено: убран дублирующий обработчик, теперь только внутри ConversationHandler) ----------
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
@@ -846,14 +873,14 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Повторите через {str(remaining).split('.')[0]}.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]])
                 )
-                return
+                return ConversationHandler.END  # не входим в состояние
         balance = round(user['game_balance'], 1)
         if balance < MIN_WITHDRAWAL:
             await query.edit_message_text(
                 f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL} ⭐\nВаш баланс: {balance} ⭐",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Профиль", callback_data="profile")]])
             )
-            return
+            return ConversationHandler.END
         text = (
             f"💸 Вывод средств\n\n"
             f"Ваш баланс: {balance} ⭐\n"
@@ -883,11 +910,11 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⏳ Заявку на вывод можно создавать раз в {WITHDRAW_COOLDOWN_HOURS} час(а).\n"
                     f"Повторите через {str(remaining).split('.')[0]}."
                 )
-                return
+                return ConversationHandler.END
         balance = round(user['game_balance'], 1)
         if balance < MIN_WITHDRAWAL:
             await update.message.reply_text(f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL} ⭐\nВаш баланс: {balance} ⭐")
-            return
+            return ConversationHandler.END
         text = (
             f"💸 Вывод средств\n\n"
             f"Ваш баланс: {balance} ⭐\n"
@@ -965,7 +992,7 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("Недостаточно средств.")
         return ConversationHandler.END
 
-    # Дополнительная проверка кулдауна (на случай параллельных запросов)
+    # Дополнительная проверка кулдауна
     last_time_str = user.get('last_withdraw_time')
     if last_time_str:
         last_time = datetime.datetime.fromisoformat(last_time_str)
@@ -977,7 +1004,6 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
     gift_count = sum(combo.values())
     request_id = await db.create_withdrawal_request(db_conn, user_id, amount, combo, gift_count, source='balance')
 
-    # Обновляем время последней заявки
     await db.set_last_withdraw_time(db_conn, user_id, datetime.datetime.now().isoformat())
 
     user_info = query.from_user
@@ -991,7 +1017,6 @@ async def confirm_withdraw_callback(update: Update, context: ContextTypes.DEFAUL
 
     for admin_id in ADMIN_IDS:
         try:
-            # Отправляем админу сообщение с кнопками управления
             keyboard = [
                 [InlineKeyboardButton("✅ Выполнено", callback_data=f"approve_withdraw_{request_id}"),
                  InlineKeyboardButton("❌ Отказать", callback_data=f"reject_withdraw_{request_id}")]
@@ -1057,7 +1082,6 @@ async def ref_to_balance_callback(update: Update, context: ContextTypes.DEFAULT_
     if amount <= 0:
         await query.answer("Нет средств для вывода.", show_alert=True)
         return
-    # Проверка условия по активным рефералам
     active_count = await db.count_active_referrals(db_conn, user_id)
     if active_count < REFERRAL_CONFIG['min_active_referrals']:
         await query.answer(f"Недостаточно активных рефералов. Требуется {REFERRAL_CONFIG['min_active_referrals']}, у вас {active_count}.", show_alert=True)
@@ -1149,7 +1173,6 @@ async def admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_approve_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Обработчик команды (можно также через колбэк, но для простоты команды)
     user_id = update.effective_user.id
     if not is_admin(user_id):
         return
@@ -1183,7 +1206,6 @@ async def admin_reject_reason_input(update: Update, context: ContextTypes.DEFAUL
     await db.reject_withdrawal_request(db_conn, request_id, reason)
     await db.log_admin_action(db_conn, update.effective_user.id, "withdrawal_reject", details=f"заявка #{request_id}: {reason}")
     await update.message.reply_text(f"❌ Заявка #{request_id} отклонена.")
-    # Уведомим пользователя (можно получить user_id из заявки)
     req = await db.get_withdrawal_request(db_conn, request_id)
     if req:
         try:
@@ -1365,8 +1387,7 @@ async def promo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Недействительный или уже использованный промокод.")
 
 async def add_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1377,12 +1398,11 @@ async def add_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db_conn = context.bot_data['db']
     await db.update_user_balance(db_conn, target_id, amount)
-    await db.log_admin_action(db_conn, user_id, "add_balance", target_id, f"сумма: {amount}")
+    await db.log_admin_action(db_conn, update.effective_user.id, "add_balance", target_id, f"сумма: {amount}")
     await update.message.reply_text(f"✅ Баланс пользователя {target_id} пополнен на {amount} ⭐")
 
 async def set_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1393,12 +1413,11 @@ async def set_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db_conn = context.bot_data['db']
     await db.set_user_balance(db_conn, target_id, amount)
-    await db.log_admin_action(db_conn, user_id, "set_balance", target_id, f"новый баланс: {amount}")
+    await db.log_admin_action(db_conn, update.effective_user.id, "set_balance", target_id, f"новый баланс: {amount}")
     await update.message.reply_text(f"✅ Баланс пользователя {target_id} установлен на {amount} ⭐")
 
 async def ban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1408,13 +1427,12 @@ async def ban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используйте: /ban <user_id> <причина>")
         return
     db_conn = context.bot_data['db']
-    await db.add_ban(db_conn, target_id, reason, user_id)
-    await db.log_admin_action(db_conn, user_id, "ban", target_id, reason)
+    await db.add_ban(db_conn, target_id, reason, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "ban", target_id, reason)
     await update.message.reply_text(f"✅ Пользователь {target_id} забанен. Причина: {reason}")
 
 async def unban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1424,12 +1442,11 @@ async def unban_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db_conn = context.bot_data['db']
     await db.remove_ban(db_conn, target_id)
-    await db.log_admin_action(db_conn, user_id, "unban", target_id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "unban", target_id)
     await update.message.reply_text(f"✅ Пользователь {target_id} разбанен.")
 
 async def mute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1441,13 +1458,12 @@ async def mute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     until = (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).isoformat()
     db_conn = context.bot_data['db']
-    await db.add_mute(db_conn, target_id, until, reason, user_id)
-    await db.log_admin_action(db_conn, user_id, "mute", target_id, f"{minutes} мин: {reason}")
+    await db.add_mute(db_conn, target_id, until, reason, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "mute", target_id, f"{minutes} мин: {reason}")
     await update.message.reply_text(f"✅ Пользователь {target_id} замучен на {minutes} мин. Причина: {reason}")
 
 async def unmute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1457,12 +1473,11 @@ async def unmute_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db_conn = context.bot_data['db']
     await db.remove_mute(db_conn, target_id)
-    await db.log_admin_action(db_conn, user_id, "unmute", target_id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "unmute", target_id)
     await update.message.reply_text(f"✅ Пользователь {target_id} размучен.")
 
 async def warn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1472,13 +1487,12 @@ async def warn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используйте: /warn <user_id> <причина>")
         return
     db_conn = context.bot_data['db']
-    await db.add_warning(db_conn, target_id, reason, user_id)
-    await db.log_admin_action(db_conn, user_id, "warn", target_id, reason)
+    await db.add_warning(db_conn, target_id, reason, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "warn", target_id, reason)
     await update.message.reply_text(f"⚠️ Пользователь {target_id} получил предупреждение: {reason}")
 
 async def unwarn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1489,14 +1503,13 @@ async def unwarn_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_conn = context.bot_data['db']
     success = await db.remove_last_warning(db_conn, target_id)
     if success:
-        await db.log_admin_action(db_conn, user_id, "unwarn", target_id)
+        await db.log_admin_action(db_conn, update.effective_user.id, "unwarn", target_id)
         await update.message.reply_text(f"✅ Предупреждение снято с {target_id}.")
     else:
         await update.message.reply_text("❌ Нет предупреждений.")
 
 async def vip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1507,13 +1520,12 @@ async def vip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     until = (datetime.datetime.now() + datetime.timedelta(days=days)).isoformat()
     db_conn = context.bot_data['db']
-    await db.set_vip(db_conn, target_id, until, user_id)
-    await db.log_admin_action(db_conn, user_id, "vip", target_id, f"{days} дней")
+    await db.set_vip(db_conn, target_id, until, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "vip", target_id, f"{days} дней")
     await update.message.reply_text(f"⭐ Пользователю {target_id} выдан VIP на {days} дней.")
 
 async def unvip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1523,12 +1535,11 @@ async def unvip_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db_conn = context.bot_data['db']
     await db.remove_vip(db_conn, target_id)
-    await db.log_admin_action(db_conn, user_id, "unvip", target_id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "unvip", target_id)
     await update.message.reply_text(f"✅ VIP снят с {target_id}.")
 
 async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     db_conn = context.bot_data['db']
@@ -1543,8 +1554,8 @@ async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Сумма должна быть от {PROMO_CONFIG['min_amount']} до {PROMO_CONFIG['max_amount']}")
         return
     code = f"PROMO{random.randint(10000,99999)}"
-    await db.create_promo_code_db(db_conn, code, amount, uses, user_id)
-    await db.log_admin_action(db_conn, user_id, "promo_create", details=f"код: {code}, сумма: {amount}, исп.: {uses}")
+    await db.create_promo_code_db(db_conn, code, amount, uses, update.effective_user.id)
+    await db.log_admin_action(db_conn, update.effective_user.id, "promo_create", details=f"код: {code}, сумма: {amount}, исп.: {uses}")
     await update.message.reply_text(f"✅ Промокод создан: {code} (сумма {amount}, использований {uses})")
     if broadcast_text:
         rows = await (await db_conn.execute("SELECT user_id FROM users")).fetchall()
@@ -1557,8 +1568,7 @@ async def promo_create_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 pass
 
 async def promo_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     try:
@@ -1568,12 +1578,11 @@ async def promo_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     db_conn = context.bot_data['db']
     await db.delete_promo_code_db(db_conn, code)
-    await db.log_admin_action(db_conn, user_id, "promo_delete", details=f"код: {code}")
+    await db.log_admin_action(db_conn, update.effective_user.id, "promo_delete", details=f"код: {code}")
     await update.message.reply_text(f"✅ Промокод {code} удалён.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     db_conn = context.bot_data['db']
@@ -1593,8 +1602,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     import psutil
@@ -1610,24 +1618,22 @@ async def system_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(text)
 
 async def clear_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     db_conn = context.bot_data['db']
     await db.clear_logs_db(db_conn)
-    await db.log_admin_action(db_conn, user_id, "clear_logs")
+    await db.log_admin_action(db_conn, update.effective_user.id, "clear_logs")
     await update.message.reply_text("✅ Логи очищены.")
 
 async def reset_weekly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     db_conn = context.bot_data['db']
     await db_conn.execute("UPDATE activity SET weekly_streak_days=0, weekly_total_bets=0, weekly_total_games=0, daily_games_count=0")
     await db_conn.commit()
-    await db.log_admin_action(db_conn, user_id, "reset_weekly")
+    await db.log_admin_action(db_conn, update.effective_user.id, "reset_weekly")
     await update.message.reply_text("✅ Недельные данные сброшены у всех пользователей.")
 
 # ---------- MAIN ----------
@@ -1659,7 +1665,7 @@ def main():
         await app.bot.set_my_commands(commands)
     loop.run_until_complete(set_bot_commands(application))
 
-    # Регистрация обработчиков
+    # Регистрация обработчиков (без дублирования для withdraw)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -1675,6 +1681,7 @@ def main():
     application.add_handler(CallbackQueryHandler(play_games_callback, pattern="^play_games$"))
     application.add_handler(CallbackQueryHandler(change_bet_callback, pattern="^change_bet$"))
     application.add_handler(CallbackQueryHandler(handle_game_selection, pattern="^play_"))
+    application.add_handler(CallbackQueryHandler(play_again_callback, pattern="^play_again_"))
     application.add_handler(CallbackQueryHandler(deposit_command, pattern="^deposit$"))
     application.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(referral_system_callback, pattern="^referral_system$"))
@@ -1701,7 +1708,7 @@ def main():
     )
     application.add_handler(conv_custom)
 
-    # ConversationHandler: вывод с игрового баланса
+    # ConversationHandler: вывод (единственный источник входа)
     conv_withdraw = ConversationHandler(
         entry_points=[
             CommandHandler("withdraw", withdraw_start),
